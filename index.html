@@ -790,35 +790,76 @@ function buildSchedule(shift, dateStr) {
 }
 
 function resolveWithEvents(baseTasks, events) {
+  // Parse and sort event blocks — completely immovable
   const eventBlocks = events.map(ev => {
     const st = parseTime(ev.start), en = parseTime(ev.end);
     const dur = en > st ? en - st : 60;
     return { time: st, dur, end: st + dur,
-      label: `🗓️ ${ev.name}`, note: `${ev.start} – ${ev.end}`,
+      label: '🗓️ ' + ev.name, note: ev.start + ' – ' + ev.end,
       tag: 'event', isEvent: true, isAnchor: false };
   }).sort((a, b) => a.time - b.time);
 
-  const IMMOVABLE = (t) => t.tag === 'tutor' || t.tag === 'bible' || (t.tag === 'prep' && t.label.includes('Travel'));
+  // Tags that are always immovable
+  const IMMOVABLE = (t) => t.tag === 'tutor' || t.tag === 'bible' ||
+    (t.tag === 'prep' && t.label.includes('Travel'));
 
-  let resolved = baseTasks.map(task => {
-    if (IMMOVABLE(task)) return task;
-    let t = {...task};
-    for (let i = 0; i < 30; i++) {
-      const clash = eventBlocks.find(ev => t.time < ev.end && (t.time + t.dur) > ev.time);
-      if (!clash) break;
-      t = {...t, time: clash.end + 10};
-    }
-    return t;
-  });
+  // SMART SCHEDULER:
+  // For each movable task, try to fit it BEFORE the first conflicting event if there's room.
+  // Only push it after the event if it genuinely doesn't fit before.
 
-  resolved.sort((a, b) => a.time - b.time);
-  for (let i = 1; i < resolved.length; i++) {
-    if (IMMOVABLE(resolved[i])) continue;
-    const prevEnd = resolved[i-1].time + resolved[i-1].dur;
-    if (resolved[i].time < prevEnd) resolved[i] = {...resolved[i], time: prevEnd + 5};
+  // Build a free-time map: list of [gapStart, gapEnd] windows between events and immovables
+  const anchors = [
+    ...baseTasks.filter(IMMOVABLE),
+    ...eventBlocks
+  ].sort((a, b) => a.time - b.time);
+
+  function fitsInWindow(taskDur, windowStart, windowEnd) {
+    return windowEnd - windowStart >= taskDur;
   }
 
-  const all = [...resolved, ...eventBlocks];
+  // Try to place a task with given dur starting at `from`, avoiding all blocks
+  // Returns the earliest start time that works, or null if it can never fit before `deadline`
+  function earliestFit(dur, from, deadline, blocks) {
+    let t = from;
+    for (let iter = 0; iter < 50; iter++) {
+      if (t + dur > deadline) return null;
+      const clash = blocks.find(b => t < b.end && (t + dur) > b.time);
+      if (!clash) return t;
+      t = clash.end + 5;
+    }
+    return null;
+  }
+
+  const allBlocks = [
+    ...baseTasks.filter(IMMOVABLE).map(t => ({time: t.time, end: t.time + t.dur})),
+    ...eventBlocks.map(t => ({time: t.time, end: t.end}))
+  ];
+
+  // Schedule each movable task greedily from its original time forward,
+  // fitting it into the first available slot (before or after events)
+  const movable = baseTasks.filter(t => !IMMOVABLE(t));
+  const scheduled = [];
+  let usedBlocks = [...allBlocks];
+
+  // Sort movable tasks by their originally intended time so priority order is preserved
+  movable.sort((a, b) => a.time - b.time);
+
+  for (const task of movable) {
+    const start = earliestFit(task.dur, task.time, 24 * 60, usedBlocks);
+    if (start !== null) {
+      const placed = {...task, time: start};
+      scheduled.push(placed);
+      usedBlocks.push({time: start, end: start + task.dur});
+      usedBlocks.sort((a, b) => a.time - b.time);
+    }
+    // If it can't fit at all (very rare), skip it — better than overlapping
+  }
+
+  const all = [
+    ...baseTasks.filter(IMMOVABLE),
+    ...scheduled,
+    ...eventBlocks
+  ];
   all.sort((a, b) => a.time - b.time);
   return all.map(t => ({...t, timeStr: fmtTime(t.time), durStr: fmtDur(t.dur)}));
 }

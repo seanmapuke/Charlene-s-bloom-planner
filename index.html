@@ -790,7 +790,7 @@ function buildSchedule(shift, dateStr) {
 }
 
 function resolveWithEvents(baseTasks, events) {
-  // Parse and sort event blocks — completely immovable
+  // Parse event blocks — immovable, sorted by time
   const eventBlocks = events.map(ev => {
     const st = parseTime(ev.start), en = parseTime(ev.end);
     const dur = en > st ? en - st : 60;
@@ -799,65 +799,69 @@ function resolveWithEvents(baseTasks, events) {
       tag: 'event', isEvent: true, isAnchor: false };
   }).sort((a, b) => a.time - b.time);
 
-  // Tags that are always immovable
   const IMMOVABLE = (t) => t.tag === 'tutor' || t.tag === 'bible' ||
     (t.tag === 'prep' && t.label.includes('Travel'));
 
-  // SMART SCHEDULER:
-  // For each movable task, try to fit it BEFORE the first conflicting event if there's room.
-  // Only push it after the event if it genuinely doesn't fit before.
+  // Wake time = earliest task in the base schedule
+  const wakeTime = baseTasks.reduce((min, t) => Math.min(min, t.time), Infinity);
 
-  // Build a free-time map: list of [gapStart, gapEnd] windows between events and immovables
-  const anchors = [
-    ...baseTasks.filter(IMMOVABLE),
-    ...eventBlocks
-  ].sort((a, b) => a.time - b.time);
+  // First event start time — tasks that fit before this get scheduled first
+  const firstEventStart = eventBlocks.length > 0 ? eventBlocks[0].time : 24 * 60;
 
-  function fitsInWindow(taskDur, windowStart, windowEnd) {
-    return windowEnd - windowStart >= taskDur;
-  }
+  // Bible Study is always first and immovable — find where it ends
+  const bibleTask = baseTasks.find(t => t.tag === 'bible');
+  const bibleEnd = bibleTask ? bibleTask.time + bibleTask.dur + 5 : wakeTime;
 
-  // Try to place a task with given dur starting at `from`, avoiding all blocks
-  // Returns the earliest start time that works, or null if it can never fit before `deadline`
-  function earliestFit(dur, from, deadline, blocks) {
-    let t = from;
-    for (let iter = 0; iter < 50; iter++) {
-      if (t + dur > deadline) return null;
-      const clash = blocks.find(b => t < b.end && (t + dur) > b.time);
-      if (!clash) return t;
-      t = clash.end + 5;
-    }
-    return null;
-  }
+  // Time available between Bible end and first event
+  const preEventGap = firstEventStart - bibleEnd;
 
-  const allBlocks = [
-    ...baseTasks.filter(IMMOVABLE).map(t => ({time: t.time, end: t.time + t.dur})),
-    ...eventBlocks.map(t => ({time: t.time, end: t.end}))
-  ];
+  // Split movable tasks into two groups based on their intended ORDER
+  // (use index in baseTasks as priority)
+  const movable = baseTasks
+    .map((t, i) => ({ ...t, _idx: i }))
+    .filter(t => !IMMOVABLE(t))
+    .sort((a, b) => a._idx - b._idx);
 
-  // Schedule each movable task greedily from its original time forward,
-  // fitting it into the first available slot (before or after events)
-  const movable = baseTasks.filter(t => !IMMOVABLE(t));
-  const scheduled = [];
-  let usedBlocks = [...allBlocks];
-
-  // Sort movable tasks by their originally intended time so priority order is preserved
-  movable.sort((a, b) => a.time - b.time);
+  // Greedily fill pre-event gap with as many morning tasks as fit (in order)
+  // then schedule remaining tasks after the last event ends
+  const preEventTasks = [];
+  const postEventTasks = [];
+  let preGapUsed = 0;
 
   for (const task of movable) {
-    const start = earliestFit(task.dur, task.time, 24 * 60, usedBlocks);
-    if (start !== null) {
-      const placed = {...task, time: start};
-      scheduled.push(placed);
-      usedBlocks.push({time: start, end: start + task.dur});
-      usedBlocks.sort((a, b) => a.time - b.time);
+    const needed = task.dur + 5;
+    if (preGapUsed + task.dur <= preEventGap) {
+      preEventTasks.push(task);
+      preGapUsed += needed;
+    } else {
+      postEventTasks.push(task);
     }
-    // If it can't fit at all (very rare), skip it — better than overlapping
   }
+
+  // Schedule pre-event tasks starting right after Bible Study
+  let cursor = bibleEnd;
+  const scheduledPre = preEventTasks.map(task => {
+    const placed = { ...task, time: cursor };
+    cursor += task.dur + 5;
+    return placed;
+  });
+
+  // Schedule post-event tasks starting after the last event ends
+  const lastEventEnd = eventBlocks.length > 0
+    ? Math.max(...eventBlocks.map(e => e.end))
+    : bibleEnd;
+  cursor = lastEventEnd + 5;
+
+  const scheduledPost = postEventTasks.map(task => {
+    const placed = { ...task, time: cursor };
+    cursor += task.dur + 5;
+    return placed;
+  });
 
   const all = [
     ...baseTasks.filter(IMMOVABLE),
-    ...scheduled,
+    ...scheduledPre,
+    ...scheduledPost,
     ...eventBlocks
   ];
   all.sort((a, b) => a.time - b.time);

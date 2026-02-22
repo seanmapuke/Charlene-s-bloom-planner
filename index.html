@@ -666,7 +666,7 @@ function getShift(d)  { return state.shifts[d]  || null; }
 function getSess(d)   { return state.history[d] || null; }
 function ensureSess(d) {
   const shift = getShift(d);
-  const tasks = shift ? buildSchedule(shift) : [];
+  const tasks = shift ? buildSchedule(shift, d) : [];
   if (!state.history[d]) state.history[d] = { done: [], total: tasks.length, water: 0 };
   state.history[d].total = tasks.length;
   return state.history[d];
@@ -684,46 +684,57 @@ function ensureSess(d) {
 // Fixed order:
 //   Bible Study (1hr) → Shower+Dress (30min) → Breakfast → [Workout] → [Study/Tutor blocks] → Meals → Skincare → Sleep
 // ─────────────────────────────────────────────
-function buildSchedule(shift) {
+function isWeekend(dateStr) {
+  const d = new Date(dateStr + 'T12:00:00');
+  const day = d.getDay();
+  return day === 0 || day === 6;
+}
+
+function buildSchedule(shift, dateStr) {
   const { dayType = 'study', tutorStart, tutorEnd, workoutType = 'gym', events = [] } = shift;
 
   const tutorStartMin = (dayType === 'tutor' && tutorStart) ? parseTime(tutorStart) : null;
   const tutorEndMin   = (dayType === 'tutor' && tutorEnd)   ? parseTime(tutorEnd)   : null;
 
-  // Wake time
+  // Wake time: weekend=10am, weekday=8am, early-tutor-weekday=7am. Sleep=10pm.
+  const weekend = dateStr ? isWeekend(dateStr) : false;
   let wakeTime;
-  if (dayType === 'rest')                               wakeTime = 9 * 60;
-  else if (dayType === 'tutor' && tutorStartMin < 11*60) wakeTime = 7 * 60 + 30;
-  else                                                   wakeTime = 8 * 60;
+  if (weekend)                                             wakeTime = 10 * 60;
+  else if (dayType === 'tutor' && tutorStartMin < 10*60)  wakeTime = 7 * 60;
+  else                                                     wakeTime = 8 * 60;
+
+  const SLEEP_TIME = 22 * 60;
 
   const tasks = [];
   let cursor = wakeTime;
 
+  // place() — puts task at cursor, advances cursor by dur+5
   function place(dur, label, note, tag, isAnchor = false) {
     tasks.push({ time: cursor, dur, label, note, tag, isAnchor, isEvent: false });
     cursor += dur + 5;
   }
+
+  // pin() — puts task at exact time (or cursor if cursor is later), advances cursor
   function pin(time, dur, label, note, tag, isAnchor = false) {
-    tasks.push({ time, dur, label, note, tag, isAnchor, isEvent: false });
-    cursor = time + dur + 5;
+    const actualTime = Math.max(time, cursor);
+    tasks.push({ time: actualTime, dur, label, note, tag, isAnchor, isEvent: false });
+    cursor = actualTime + dur + 5;
   }
 
-  // ── ANCHOR: Bible Study — 1 hour, always first ──
+  // ANCHOR: Bible Study — 1 hour, always first
   place(60, '📖 Bible Study', 'One hour with the Word — anchor the day in faith.', 'bible', true);
 
-  // ── Morning routine ──
-  place(15, '🚿 Shower',        'Refresh and reset', 'glow');
-  place(15, '👗 Get Dressed',   'Put your best self forward', 'glow');
-  place(30, '🍳 Breakfast',     'High protein, balanced — eating to fuel not restrict', 'food');
+  // Morning routine
+  place(15, '🚿 Shower',      'Refresh and reset', 'glow');
+  place(15, '👗 Get Dressed', 'Put your best self forward', 'glow');
+  place(30, '🍳 Breakfast',   'High protein, balanced — eating to fuel not restrict', 'food');
 
-  // ── Workout ──
-  if (workoutType === 'gym')    place(75, '💪 Gym',   "Drive + 1 hr lift — consistency is everything", 'gym');
+  // Workout
+  if      (workoutType === 'gym')    place(75, '💪 Gym',    'Drive + 1 hr lift — consistency is everything', 'gym');
   else if (workoutType === 'cardio') place(45, '🏃 Cardio', 'Run, bike, or dance — move your body', 'cardio');
   else if (workoutType === 'walk')   place(35, '🚶 Walk',   'Fresh air + steps — counts more than you think', 'walk');
-  // rest = nothing
 
   if (dayType === 'rest') {
-    // ── REST DAY ──
     place(120, '📚 Study Block',    '2 hr flexible study — no pressure, stay consistent', 'study');
     place(30,  '🥗 Lunch',          'Light, balanced, satisfying', 'food');
     place(90,  '🌿 Free Time',      'Read, friends, watch something, recharge fully', 'free');
@@ -732,9 +743,8 @@ function buildSchedule(shift) {
     place(20,  '🗓️ Plan Tomorrow', "Review tomorrow's schedule, set intentions", 'prep');
 
   } else if (dayType === 'study') {
-    // ── FULL STUDY DAY ──
     place(90,  '📚 Study Block 1',  'Deep focus — hardest subject first while brain is fresh', 'study');
-    place(30,  '🥗 Lunch',          'Step away, eat properly, don\'t skip this', 'food');
+    place(30,  '🥗 Lunch',          "Step away, eat properly, don't skip this", 'food');
     place(90,  '📚 Study Block 2',  'Second session — review, practice problems, notes', 'study');
     place(30,  '☕ Break',           'Stretch, water, 10 min walk if possible', 'free');
     place(60,  '📚 Study Block 3',  'Final push — wrap up, review what you learned today', 'study');
@@ -743,33 +753,38 @@ function buildSchedule(shift) {
     place(20,  '🗓️ Plan Tomorrow', "Set tomorrow's schedule", 'prep');
 
   } else {
-    // ── TUTORING DAY ──
-    // Study before tutor if there's morning time
-    const travelToTutor = tutorStartMin ? tutorStartMin - 15 : null;
-    const morningGap = travelToTutor ? travelToTutor - cursor : 0;
-    if (morningGap >= 50) {
-      place(45, '📚 Morning Study', 'Quick study block before your session', 'study');
-    }
-
+    // TUTORING DAY
     if (tutorStartMin !== null) {
-      const lunchAt = Math.max(cursor, tutorStartMin - 50);
-      pin(lunchAt, 30, '🥗 Lunch', 'Eat before your session — don\'t work on empty', 'food');
-      pin(travelToTutor, 15, '🚗 Travel',  '15 min to session', 'prep');
-      pin(tutorStartMin, tutorEndMin - tutorStartMin,
-        '👩‍🏫 Tutoring Session',
-        `${fmtTime(tutorStartMin)} – ${fmtTime(tutorEndMin)} — you\'re the expert, own it`,
+      const travelTime = tutorStartMin - 15;
+      const morningGap = travelTime - cursor;
+      if (morningGap >= 60) {
+        place(Math.min(morningGap - 20, 90), '📚 Morning Study', 'Study block before your session', 'study');
+      }
+      // Lunch 45min before travel if space, else right now
+      const idealLunch = travelTime - 45;
+      if (idealLunch > cursor + 10) {
+        pin(idealLunch, 30, '🥗 Lunch', "Eat before your session — don't work on empty", 'food');
+      } else {
+        place(30, '🥗 Lunch', "Eat before your session — don't work on empty", 'food');
+      }
+      // Pin travel block — pin() uses Math.max so these never overlap
+      pin(travelTime,    15,                       '🚗 Travel to Session', '15 min drive', 'prep');
+      pin(tutorStartMin, tutorEndMin-tutorStartMin, '👩‍🏫 Tutoring Session',
+        fmtTime(tutorStartMin) + ' – ' + fmtTime(tutorEndMin) + " — you're the expert, own it",
         'tutor', true);
-      pin(tutorEndMin, 15, '🚗 Travel Home', '15 min home', 'prep');
+      pin(tutorEndMin,   15,                       '🚗 Travel Home', '15 min drive', 'prep');
     }
-
-    place(90, '📚 Study Block',   'Post-session study — momentum is on your side', 'study');
-    place(30, '🍽️ Dinner',       'Balanced plate — you earned it today', 'food');
-    place(15, '🌙 Skincare',      'Night routine — cleanse, tone, moisturise, glow', 'glow');
-    place(20, "🗓️ Plan Tomorrow", "Review and set tomorrow's intentions", 'prep');
+    // Post-tutor study if time allows before sleep
+    const remaining = SLEEP_TIME - cursor - 30 - 15 - 20 - 15;
+    if (remaining >= 45) {
+      place(Math.min(remaining, 90), '📚 Study Block', 'Post-session study — momentum is on your side', 'study');
+    }
+    place(30, '🍽️ Dinner',        'Balanced plate — you earned it today', 'food');
+    place(15, '🌙 Skincare',       'Night routine — cleanse, tone, moisturise, glow', 'glow');
+    place(20, '🗓️ Plan Tomorrow', "Review and set tomorrow's intentions", 'prep');
   }
 
   if (events.length > 0) return resolveWithEvents(tasks, events);
-
   tasks.sort((a, b) => a.time - b.time);
   return tasks.map(t => ({...t, timeStr: fmtTime(t.time), durStr: fmtDur(t.dur)}));
 }
@@ -866,21 +881,28 @@ function selectDayType(type) {
   pendingDayType = type;
   ['study','tutor','rest'].forEach(t => {
     const el = document.getElementById(`dtype-${t}`);
-    if (t === 'study') {
-      el.style.borderColor = type === t ? 'var(--rose)' : '';
-      el.style.background  = type === t ? 'var(--rose-dim)' : '';
-      el.style.color       = type === t ? 'var(--rose)' : '';
-    } else if (t === 'tutor') {
-      el.style.borderColor = type === t ? '#60a5fa' : '';
-      el.style.background  = type === t ? 'rgba(96,165,250,0.12)' : '';
-      el.style.color       = type === t ? '#60a5fa' : '';
-    } else {
-      el.style.borderColor = type === t ? 'var(--sage)' : '';
-      el.style.background  = type === t ? 'var(--sage-dim)' : '';
-      el.style.color       = type === t ? 'var(--sage)' : '';
-    }
-    el.classList.toggle('selected', t === type);
+    // Clear all inline styles first so CSS class takes over cleanly
+    el.style.borderColor = '';
+    el.style.background  = '';
+    el.style.color       = '';
+    el.classList.remove('selected');
   });
+  // Apply selected style to the chosen type
+  const sel = document.getElementById(`dtype-${type}`);
+  sel.classList.add('selected');
+  if (type === 'study') {
+    sel.style.borderColor = 'var(--rose)';
+    sel.style.background  = 'var(--rose-dim)';
+    sel.style.color       = 'var(--rose)';
+  } else if (type === 'tutor') {
+    sel.style.borderColor = 'var(--lavender)';
+    sel.style.background  = 'var(--lavender-dim)';
+    sel.style.color       = 'var(--lavender)';
+  } else {
+    sel.style.borderColor = 'var(--sage)';
+    sel.style.background  = 'var(--sage-dim)';
+    sel.style.color       = 'var(--sage)';
+  }
   document.getElementById('tutor-time-fields').style.display = type === 'tutor' ? 'block' : 'none';
 }
 
@@ -1010,7 +1032,7 @@ function renderTasks() {
     document.getElementById('progress-fill').style.width = '0%';
     return;
   }
-  const tasks = buildSchedule(shift);
+  const tasks = buildSchedule(shift, state.activeDate);
   const sess  = ensureSess(state.activeDate);
   container.innerHTML = tasks.map((t, i) => {
     const done = sess.done.includes(i);
@@ -1131,7 +1153,7 @@ function toggleTask(i) {
   if (sess.done.includes(i)) { sess.done = sess.done.filter(x => x !== i); }
   else {
     sess.done.push(i);
-    const tasks = shift ? buildSchedule(shift) : [];
+    const tasks = shift ? buildSchedule(shift, d) : [];
     if (sess.done.length === tasks.length && tasks.length > 0) showToast('🌸 Day complete! You did that.');
   }
   saveState(); renderTasks(); renderPills(); renderSidebar();
